@@ -80,6 +80,22 @@ type dealInput struct {
 	Memo              string `json:"memo"`
 }
 
+type activity struct {
+	ID           string    `json:"id"`
+	CustomerID   string    `json:"customerId"`
+	CustomerName string    `json:"customerName"`
+	OwnerID      string    `json:"ownerId"`
+	Type         string    `json:"type"`
+	Body         string    `json:"body"`
+	OccurredAt   time.Time `json:"occurredAt"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+type activityInput struct {
+	Type string `json:"type"`
+	Body string `json:"body"`
+}
+
 type task struct {
 	ID         string     `json:"id"`
 	CustomerID *string    `json:"customerId"`
@@ -163,6 +179,8 @@ func main() {
 	customers.GET("/:id", application.getCustomer)
 	customers.PUT("/:id", application.updateCustomer)
 	customers.DELETE("/:id", application.deleteCustomer)
+	customers.GET("/:id/activities", application.listCustomerActivities)
+	customers.POST("/:id/activities", application.createCustomerActivity)
 
 	deals := api.Group("/deals", application.authRequired())
 	deals.GET("", application.listDeals)
@@ -170,6 +188,9 @@ func main() {
 	deals.GET("/:id", application.getDeal)
 	deals.PUT("/:id", application.updateDeal)
 	deals.DELETE("/:id", application.deleteDeal)
+
+	activities := api.Group("/activities", application.authRequired())
+	activities.DELETE("/:id", application.deleteActivity)
 
 	tasks := api.Group("/tasks", application.authRequired())
 	tasks.GET("/today", application.listTodayTasks)
@@ -529,6 +550,100 @@ func (a app) deleteDeal(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (a app) listCustomerActivities(c *gin.Context) {
+	userID := c.GetString("userID")
+	customerID := c.Param("id")
+
+	if ok := a.customerBelongsToUser(customerID, userID); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+
+	rows, err := a.db.Query(`
+		SELECT a.id::text, a.customer_id::text, c.name, a.owner_id::text, a.type, a.body, a.occurred_at, a.created_at
+		FROM activities a
+		INNER JOIN customers c ON c.id = a.customer_id
+		WHERE a.customer_id = $1 AND a.owner_id = $2 AND c.deleted_at IS NULL
+		ORDER BY a.occurred_at DESC, a.created_at DESC
+	`, customerID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load activities"})
+		return
+	}
+	defer rows.Close()
+
+	activities := []activity{}
+	for rows.Next() {
+		item, err := scanActivity(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read activity"})
+			return
+		}
+		activities = append(activities, item)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load activities"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"activities": activities})
+}
+
+func (a app) createCustomerActivity(c *gin.Context) {
+	userID := c.GetString("userID")
+	customerID := c.Param("id")
+
+	if ok := a.customerBelongsToUser(customerID, userID); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+
+	input, ok := bindActivityInput(c)
+	if !ok {
+		return
+	}
+
+	row := a.db.QueryRow(`
+		INSERT INTO activities (customer_id, owner_id, type, body)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id::text, customer_id::text, (SELECT name FROM customers WHERE id = $1), owner_id::text, type, body, occurred_at, created_at
+	`, customerID, userID, input.Type, input.Body)
+
+	item, err := scanActivity(row)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create activity"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"activity": item})
+}
+
+func (a app) deleteActivity(c *gin.Context) {
+	userID := c.GetString("userID")
+	activityID := c.Param("id")
+
+	result, err := a.db.Exec(`
+		DELETE FROM activities
+		WHERE id = $1 AND owner_id = $2
+	`, activityID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete activity"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete activity"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "activity not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 func (a app) listTodayTasks(c *gin.Context) {
 	userID := c.GetString("userID")
 	today := c.Query("date")
@@ -763,6 +878,23 @@ func scanDeal(row interface {
 	return item, err
 }
 
+func scanActivity(row interface {
+	Scan(dest ...interface{}) error
+}) (activity, error) {
+	var item activity
+	err := row.Scan(
+		&item.ID,
+		&item.CustomerID,
+		&item.CustomerName,
+		&item.OwnerID,
+		&item.Type,
+		&item.Body,
+		&item.OccurredAt,
+		&item.CreatedAt,
+	)
+	return item, err
+}
+
 func scanTask(row interface {
 	Scan(dest ...interface{}) error
 }) (task, error) {
@@ -855,6 +987,31 @@ func bindDealInput(c *gin.Context) (dealInput, bool) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "expectedCloseDate must be YYYY-MM-DD"})
 			return dealInput{}, false
 		}
+	}
+
+	return input, true
+}
+
+func bindActivityInput(c *gin.Context) (activityInput, bool) {
+	var input activityInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return activityInput{}, false
+	}
+
+	input.Type = strings.TrimSpace(input.Type)
+	input.Body = strings.TrimSpace(input.Body)
+
+	if input.Type == "" {
+		input.Type = "note"
+	}
+	if input.Type != "note" && input.Type != "call" && input.Type != "email" && input.Type != "meeting" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "type must be note, call, email, or meeting"})
+		return activityInput{}, false
+	}
+	if input.Body == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "body is required"})
+		return activityInput{}, false
 	}
 
 	return input, true
