@@ -56,6 +56,30 @@ type customerInput struct {
 	Memo    string `json:"memo"`
 }
 
+type deal struct {
+	ID                string     `json:"id"`
+	CustomerID        string     `json:"customerId"`
+	CustomerName      string     `json:"customerName"`
+	OwnerID           string     `json:"ownerId"`
+	Title             string     `json:"title"`
+	Amount            int        `json:"amount"`
+	Status            string     `json:"status"`
+	ExpectedCloseDate *string    `json:"expectedCloseDate"`
+	Memo              *string    `json:"memo"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	DeletedAt         *time.Time `json:"-"`
+}
+
+type dealInput struct {
+	CustomerID        string `json:"customerId"`
+	Title             string `json:"title"`
+	Amount            int    `json:"amount"`
+	Status            string `json:"status"`
+	ExpectedCloseDate string `json:"expectedCloseDate"`
+	Memo              string `json:"memo"`
+}
+
 type task struct {
 	ID         string     `json:"id"`
 	CustomerID *string    `json:"customerId"`
@@ -139,6 +163,13 @@ func main() {
 	customers.GET("/:id", application.getCustomer)
 	customers.PUT("/:id", application.updateCustomer)
 	customers.DELETE("/:id", application.deleteCustomer)
+
+	deals := api.Group("/deals", application.authRequired())
+	deals.GET("", application.listDeals)
+	deals.POST("", application.createDeal)
+	deals.GET("/:id", application.getDeal)
+	deals.PUT("/:id", application.updateDeal)
+	deals.DELETE("/:id", application.deleteDeal)
 
 	tasks := api.Group("/tasks", application.authRequired())
 	tasks.GET("/today", application.listTodayTasks)
@@ -342,6 +373,156 @@ func (a app) deleteCustomer(c *gin.Context) {
 	}
 	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+func (a app) listDeals(c *gin.Context) {
+	userID := c.GetString("userID")
+
+	rows, err := a.db.Query(`
+		SELECT d.id::text, d.customer_id::text, c.name, d.owner_id::text, d.title, d.amount, d.status, d.expected_close_date, d.memo, d.created_at, d.updated_at, d.deleted_at
+		FROM deals d
+		INNER JOIN customers c ON c.id = d.customer_id
+		WHERE d.owner_id = $1 AND d.deleted_at IS NULL AND c.deleted_at IS NULL
+		ORDER BY d.updated_at DESC, d.created_at DESC
+	`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load deals"})
+		return
+	}
+	defer rows.Close()
+
+	deals := []deal{}
+	for rows.Next() {
+		item, err := scanDeal(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read deal"})
+			return
+		}
+		deals = append(deals, item)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load deals"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deals": deals})
+}
+
+func (a app) createDeal(c *gin.Context) {
+	userID := c.GetString("userID")
+
+	input, ok := bindDealInput(c)
+	if !ok {
+		return
+	}
+	if ok := a.customerBelongsToUser(input.CustomerID, userID); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "customer not found"})
+		return
+	}
+
+	row := a.db.QueryRow(`
+		INSERT INTO deals (customer_id, owner_id, title, amount, status, expected_close_date, memo)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::date, NULLIF($7, ''))
+		RETURNING id::text, customer_id::text, (SELECT name FROM customers WHERE id = $1), owner_id::text, title, amount, status, expected_close_date, memo, created_at, updated_at, deleted_at
+	`, input.CustomerID, userID, input.Title, input.Amount, input.Status, input.ExpectedCloseDate, input.Memo)
+
+	item, err := scanDeal(row)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create deal"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"deal": item})
+}
+
+func (a app) getDeal(c *gin.Context) {
+	userID := c.GetString("userID")
+	dealID := c.Param("id")
+
+	row := a.db.QueryRow(`
+		SELECT d.id::text, d.customer_id::text, c.name, d.owner_id::text, d.title, d.amount, d.status, d.expected_close_date, d.memo, d.created_at, d.updated_at, d.deleted_at
+		FROM deals d
+		INNER JOIN customers c ON c.id = d.customer_id
+		WHERE d.id = $1 AND d.owner_id = $2 AND d.deleted_at IS NULL AND c.deleted_at IS NULL
+	`, dealID, userID)
+
+	item, err := scanDeal(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "deal not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load deal"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deal": item})
+}
+
+func (a app) updateDeal(c *gin.Context) {
+	userID := c.GetString("userID")
+	dealID := c.Param("id")
+
+	input, ok := bindDealInput(c)
+	if !ok {
+		return
+	}
+	if ok := a.customerBelongsToUser(input.CustomerID, userID); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "customer not found"})
+		return
+	}
+
+	row := a.db.QueryRow(`
+		UPDATE deals
+		SET customer_id = $3,
+			title = $4,
+			amount = $5,
+			status = $6,
+			expected_close_date = NULLIF($7, '')::date,
+			memo = NULLIF($8, ''),
+			updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+		RETURNING id::text, customer_id::text, (SELECT name FROM customers WHERE id = $3), owner_id::text, title, amount, status, expected_close_date, memo, created_at, updated_at, deleted_at
+	`, dealID, userID, input.CustomerID, input.Title, input.Amount, input.Status, input.ExpectedCloseDate, input.Memo)
+
+	item, err := scanDeal(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "deal not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update deal"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"deal": item})
+}
+
+func (a app) deleteDeal(c *gin.Context) {
+	userID := c.GetString("userID")
+	dealID := c.Param("id")
+
+	result, err := a.db.Exec(`
+		UPDATE deals
+		SET deleted_at = now(), updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+	`, dealID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete deal"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete deal"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "deal not found"})
 		return
 	}
 
@@ -554,6 +735,34 @@ func scanCustomer(row interface {
 	return item, err
 }
 
+func scanDeal(row interface {
+	Scan(dest ...interface{}) error
+}) (deal, error) {
+	var item deal
+	var expectedCloseDate sql.NullTime
+
+	err := row.Scan(
+		&item.ID,
+		&item.CustomerID,
+		&item.CustomerName,
+		&item.OwnerID,
+		&item.Title,
+		&item.Amount,
+		&item.Status,
+		&expectedCloseDate,
+		&item.Memo,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&item.DeletedAt,
+	)
+	if expectedCloseDate.Valid {
+		formatted := expectedCloseDate.Time.Format("2006-01-02")
+		item.ExpectedCloseDate = &formatted
+	}
+
+	return item, err
+}
+
 func scanTask(row interface {
 	Scan(dest ...interface{}) error
 }) (task, error) {
@@ -613,6 +822,44 @@ func bindCustomerInput(c *gin.Context) (customerInput, bool) {
 	return input, true
 }
 
+func bindDealInput(c *gin.Context) (dealInput, bool) {
+	var input dealInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return dealInput{}, false
+	}
+
+	input.CustomerID = strings.TrimSpace(input.CustomerID)
+	input.Title = strings.TrimSpace(input.Title)
+	input.Status = strings.TrimSpace(input.Status)
+	input.ExpectedCloseDate = strings.TrimSpace(input.ExpectedCloseDate)
+	input.Memo = strings.TrimSpace(input.Memo)
+
+	if input.CustomerID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "customerId is required"})
+		return dealInput{}, false
+	}
+	if input.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
+		return dealInput{}, false
+	}
+	if input.Amount < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "amount must be zero or greater"})
+		return dealInput{}, false
+	}
+	if input.Status == "" {
+		input.Status = "open"
+	}
+	if input.ExpectedCloseDate != "" {
+		if _, err := parseDate(input.ExpectedCloseDate); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "expectedCloseDate must be YYYY-MM-DD"})
+			return dealInput{}, false
+		}
+	}
+
+	return input, true
+}
+
 func bindTaskInput(c *gin.Context) (taskInput, bool) {
 	var input taskInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -639,6 +886,18 @@ func bindTaskInput(c *gin.Context) (taskInput, bool) {
 
 func parseDate(value string) (time.Time, error) {
 	return time.Parse("2006-01-02", value)
+}
+
+func (a app) customerBelongsToUser(customerID string, userID string) bool {
+	var exists bool
+	err := a.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1
+			FROM customers
+			WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+		)
+	`, customerID, userID).Scan(&exists)
+	return err == nil && exists
 }
 
 func corsMiddleware() gin.HandlerFunc {
