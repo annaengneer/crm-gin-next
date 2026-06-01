@@ -35,6 +35,41 @@ type CustomerForm = {
   memo: string;
 };
 
+type Deal = {
+  id: string;
+  customerId: string;
+  customerName: string;
+  ownerId: string;
+  title: string;
+  amount: number;
+  status: string;
+  expectedCloseDate: string | null;
+  memo: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type DealForm = {
+  customerId: string;
+  title: string;
+  amount: string;
+  status: string;
+  expectedCloseDate: string;
+  memo: string;
+};
+
+type Task = {
+  id: string;
+  customerId: string | null;
+  dealId: string | null;
+  ownerId: string;
+  title: string;
+  dueDate: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type AuthResponse = {
   accessToken: string;
   user: User;
@@ -52,6 +87,22 @@ type CustomerResponse = {
   customer: Customer;
 };
 
+type DealsResponse = {
+  deals: Deal[];
+};
+
+type DealResponse = {
+  deal: Deal;
+};
+
+type TasksResponse = {
+  tasks: Task[];
+};
+
+type TaskResponse = {
+  task: Task;
+};
+
 const tokenStorageKey = "crm_access_token";
 
 const emptyCustomerForm: CustomerForm = {
@@ -63,6 +114,15 @@ const emptyCustomerForm: CustomerForm = {
   memo: "",
 };
 
+const emptyDealForm: DealForm = {
+  customerId: "",
+  title: "",
+  amount: "0",
+  status: "open",
+  expectedCloseDate: "",
+  memo: "",
+};
+
 const statusLabels: Record<string, string> = {
   lead: "見込み",
   active: "進行中",
@@ -70,16 +130,41 @@ const statusLabels: Record<string, string> = {
   closed: "完了",
 };
 
+const dealStatusLabels: Record<string, string> = {
+  open: "進行中",
+  won: "受注",
+  lost: "失注",
+  paused: "保留",
+};
+
+function getTodayDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [deals, setDeals] = useState<Deal[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null,
   );
+  const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [form, setForm] = useState<CustomerForm>(emptyCustomerForm);
+  const [dealForm, setDealForm] = useState<DealForm>(emptyDealForm);
+  const [taskTitle, setTaskTitle] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCustomersLoading, setIsCustomersLoading] = useState(false);
+  const [isDealsLoading, setIsDealsLoading] = useState(false);
+  const [isTasksLoading, setIsTasksLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDealSaving, setIsDealSaving] = useState(false);
+  const [isTaskSaving, setIsTaskSaving] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -87,6 +172,11 @@ export default function Home() {
     () =>
       customers.find((customer) => customer.id === selectedCustomerId) ?? null,
     [customers, selectedCustomerId],
+  );
+
+  const selectedDeal = useMemo(
+    () => deals.find((deal) => deal.id === selectedDealId) ?? null,
+    [deals, selectedDealId],
   );
 
   useEffect(() => {
@@ -99,12 +189,18 @@ export default function Home() {
     apiGet<MeResponse>("/auth/me", { token: storedToken })
       .then((response) => {
         setUser(response.user);
-        return loadCustomers(storedToken);
+        return Promise.all([
+          loadCustomers(storedToken),
+          loadDeals(storedToken),
+          loadTodayTasks(storedToken),
+        ]);
       })
       .catch(() => {
         window.localStorage.removeItem(tokenStorageKey);
         setUser(null);
         setCustomers([]);
+        setDeals([]);
+        setTasks([]);
       })
       .finally(() => {
         setIsLoading(false);
@@ -122,6 +218,31 @@ export default function Home() {
     }
   }
 
+  async function loadDeals(token: string) {
+    setIsDealsLoading(true);
+
+    try {
+      const response = await apiGet<DealsResponse>("/deals", { token });
+      setDeals(response.deals);
+    } finally {
+      setIsDealsLoading(false);
+    }
+  }
+
+  async function loadTodayTasks(token: string) {
+    setIsTasksLoading(true);
+
+    try {
+      const response = await apiGet<TasksResponse>(
+        `/tasks/today?date=${getTodayDate()}`,
+        { token },
+      );
+      setTasks(response.tasks);
+    } finally {
+      setIsTasksLoading(false);
+    }
+  }
+
   async function handleGuestLogin() {
     setIsLoggingIn(true);
     setError(null);
@@ -130,7 +251,11 @@ export default function Home() {
       const response = await apiPost<AuthResponse>("/auth/guest");
       window.localStorage.setItem(tokenStorageKey, response.accessToken);
       setUser(response.user);
-      await loadCustomers(response.accessToken);
+      await Promise.all([
+        loadCustomers(response.accessToken),
+        loadDeals(response.accessToken),
+        loadTodayTasks(response.accessToken),
+      ]);
     } catch {
       setError("ゲストログインに失敗しました。時間をおいて再度お試しください。");
     } finally {
@@ -142,8 +267,13 @@ export default function Home() {
     window.localStorage.removeItem(tokenStorageKey);
     setUser(null);
     setCustomers([]);
+    setDeals([]);
+    setTasks([]);
     setSelectedCustomerId(null);
+    setSelectedDealId(null);
     setForm(emptyCustomerForm);
+    setDealForm(emptyDealForm);
+    setTaskTitle("");
     setError(null);
   }
 
@@ -163,6 +293,28 @@ export default function Home() {
   function handleNewCustomer() {
     setSelectedCustomerId(null);
     setForm(emptyCustomerForm);
+    setError(null);
+  }
+
+  function handleSelectDeal(deal: Deal) {
+    setSelectedDealId(deal.id);
+    setDealForm({
+      customerId: deal.customerId,
+      title: deal.title,
+      amount: String(deal.amount),
+      status: deal.status,
+      expectedCloseDate: deal.expectedCloseDate ?? "",
+      memo: deal.memo ?? "",
+    });
+    setError(null);
+  }
+
+  function handleNewDeal() {
+    setSelectedDealId(null);
+    setDealForm({
+      ...emptyDealForm,
+      customerId: customers[0]?.id ?? "",
+    });
     setError(null);
   }
 
@@ -227,6 +379,152 @@ export default function Home() {
       }
     } catch {
       setError("顧客の削除に失敗しました。");
+    }
+  }
+
+  async function handleSubmitDeal(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("商談を保存するにはログインしてください。");
+      return;
+    }
+    if (!dealForm.customerId) {
+      setError("商談に紐づける顧客を選択してください。");
+      return;
+    }
+    if (!dealForm.title.trim()) {
+      setError("商談名を入力してください。");
+      return;
+    }
+
+    setIsDealSaving(true);
+    setError(null);
+
+    const payload = {
+      ...dealForm,
+      amount: Number(dealForm.amount || 0),
+    };
+
+    try {
+      if (selectedDealId) {
+        const response = await apiPut<DealResponse>(
+          `/deals/${selectedDealId}`,
+          payload,
+          { token },
+        );
+        setDeals((current) =>
+          current.map((deal) =>
+            deal.id === selectedDealId ? response.deal : deal,
+          ),
+        );
+      } else {
+        const response = await apiPost<DealResponse>("/deals", payload, {
+          token,
+        });
+        setDeals((current) => [response.deal, ...current]);
+        setSelectedDealId(response.deal.id);
+      }
+    } catch {
+      setError("商談情報の保存に失敗しました。");
+    } finally {
+      setIsDealSaving(false);
+    }
+  }
+
+  async function handleDeleteDeal(dealId: string) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("商談を削除するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await apiDelete(`/deals/${dealId}`, { token });
+      setDeals((current) => current.filter((deal) => deal.id !== dealId));
+      if (selectedDealId === dealId) {
+        handleNewDeal();
+      }
+    } catch {
+      setError("商談の削除に失敗しました。");
+    }
+  }
+
+  async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを作成するにはログインしてください。");
+      return;
+    }
+    if (!taskTitle.trim()) {
+      setError("タスク名を入力してください。");
+      return;
+    }
+
+    setIsTaskSaving(true);
+    setError(null);
+
+    try {
+      const response = await apiPost<TaskResponse>(
+        "/tasks",
+        {
+          title: taskTitle,
+          dueDate: getTodayDate(),
+        },
+        { token },
+      );
+      setTasks((current) => [response.task, ...current]);
+      setTaskTitle("");
+    } catch {
+      setError("タスクの作成に失敗しました。");
+    } finally {
+      setIsTaskSaving(false);
+    }
+  }
+
+  async function handleToggleTask(task: Task) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを更新するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      const nextStatus = task.status === "done" ? "todo" : "done";
+      const response = await apiPut<TaskResponse>(
+        `/tasks/${task.id}/status`,
+        { status: nextStatus },
+        { token },
+      );
+      setTasks((current) =>
+        current.map((item) => (item.id === task.id ? response.task : item)),
+      );
+    } catch {
+      setError("タスクの更新に失敗しました。");
+    }
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを削除するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await apiDelete(`/tasks/${taskId}`, { token });
+      setTasks((current) => current.filter((task) => task.id !== taskId));
+    } catch {
+      setError("タスクの削除に失敗しました。");
     }
   }
 
@@ -298,19 +596,297 @@ export default function Home() {
           </div>
           <div className="rounded-lg border border-zinc-200 bg-white p-5">
             <p className="text-sm text-zinc-500">商談数</p>
-            <p className="mt-2 text-3xl font-semibold">0</p>
+            <p className="mt-2 text-3xl font-semibold">{deals.length}</p>
           </div>
           <div className="rounded-lg border border-zinc-200 bg-white p-5">
-            <p className="text-sm text-zinc-500">今週のタスク</p>
-            <p className="mt-2 text-3xl font-semibold">0</p>
+            <p className="text-sm text-zinc-500">今日のタスク</p>
+            <p className="mt-2 text-3xl font-semibold">{tasks.length}</p>
           </div>
         </section>
+
+        {user ? (
+          <section className="mb-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+            <div className="rounded-lg border border-zinc-200 bg-white">
+              <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4">
+                <h2 className="text-base font-semibold">商談一覧</h2>
+                <button
+                  className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400"
+                  type="button"
+                  onClick={handleNewDeal}
+                  disabled={customers.length === 0}
+                >
+                  新規作成
+                </button>
+              </div>
+
+              {isDealsLoading ? (
+                <p className="px-5 py-6 text-sm text-zinc-500">読み込み中...</p>
+              ) : deals.length === 0 ? (
+                <p className="px-5 py-6 text-sm text-zinc-500">
+                  まだ商談が登録されていません。
+                </p>
+              ) : (
+                <div className="divide-y divide-zinc-200">
+                  {deals.map((deal) => (
+                    <button
+                      className={`grid w-full gap-2 px-5 py-4 text-left transition hover:bg-zinc-50 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_110px] ${
+                        selectedDealId === deal.id ? "bg-zinc-50" : ""
+                      }`}
+                      key={deal.id}
+                      type="button"
+                      onClick={() => handleSelectDeal(deal)}
+                    >
+                      <div>
+                        <p className="font-medium">{deal.title}</p>
+                        <p className="mt-1 text-sm text-zinc-500">
+                          {deal.customerName}
+                        </p>
+                      </div>
+                      <div className="text-sm text-zinc-600">
+                        <p>{deal.amount.toLocaleString()} 円</p>
+                        <p className="mt-1">
+                          {deal.expectedCloseDate || "予定日未設定"}
+                        </p>
+                      </div>
+                      <div>
+                        <span className="inline-flex rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700">
+                          {dealStatusLabels[deal.status] ?? deal.status}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <form
+              className="rounded-lg border border-zinc-200 bg-white p-5"
+              onSubmit={handleSubmitDeal}
+            >
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <h2 className="text-base font-semibold">
+                  {selectedDeal ? "商談を編集" : "商談を作成"}
+                </h2>
+                {selectedDeal ? (
+                  <button
+                    className="rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50"
+                    type="button"
+                    onClick={() => handleDeleteDeal(selectedDeal.id)}
+                  >
+                    削除
+                  </button>
+                ) : null}
+              </div>
+
+              {customers.length === 0 ? (
+                <p className="text-sm text-zinc-500">
+                  商談を作成するには先に顧客を登録してください。
+                </p>
+              ) : (
+                <div className="space-y-4">
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      顧客
+                    </span>
+                    <select
+                      className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      value={dealForm.customerId}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          customerId: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="">選択してください</option>
+                      {customers.map((customer) => (
+                        <option key={customer.id} value={customer.id}>
+                          {customer.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      商談名
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      value={dealForm.title}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          title: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      金額
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      min="0"
+                      type="number"
+                      value={dealForm.amount}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          amount: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      ステータス
+                    </span>
+                    <select
+                      className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      value={dealForm.status}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          status: event.target.value,
+                        }))
+                      }
+                    >
+                      <option value="open">進行中</option>
+                      <option value="won">受注</option>
+                      <option value="lost">失注</option>
+                      <option value="paused">保留</option>
+                    </select>
+                  </label>
+
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      受注予定日
+                    </span>
+                    <input
+                      className="mt-1 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      type="date"
+                      value={dealForm.expectedCloseDate}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          expectedCloseDate: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+
+                  <label className="block">
+                    <span className="text-sm font-medium text-zinc-700">
+                      メモ
+                    </span>
+                    <textarea
+                      className="mt-1 min-h-24 w-full rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      value={dealForm.memo}
+                      onChange={(event) =>
+                        setDealForm((current) => ({
+                          ...current,
+                          memo: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              )}
+
+              <button
+                className="mt-5 w-full rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                type="submit"
+                disabled={isDealSaving || customers.length === 0}
+              >
+                {isDealSaving ? "保存中..." : "保存"}
+              </button>
+            </form>
+          </section>
+        ) : null}
+
+        {user ? (
+          <section className="mb-6 rounded-lg border border-zinc-200 bg-white">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="text-base font-semibold">今日のタスク</h2>
+            </div>
+
+            <form
+              className="flex flex-col gap-3 border-b border-zinc-200 px-5 py-4 sm:flex-row"
+              onSubmit={handleCreateTask}
+            >
+              <input
+                className="min-w-0 flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                placeholder="今日やることを入力"
+                value={taskTitle}
+                onChange={(event) => setTaskTitle(event.target.value)}
+              />
+              <button
+                className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                type="submit"
+                disabled={isTaskSaving}
+              >
+                {isTaskSaving ? "追加中..." : "追加"}
+              </button>
+            </form>
+
+            {isTasksLoading ? (
+              <p className="px-5 py-6 text-sm text-zinc-500">読み込み中...</p>
+            ) : tasks.length === 0 ? (
+              <p className="px-5 py-6 text-sm text-zinc-500">
+                今日のタスクはありません。
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-200">
+                {tasks.map((task) => (
+                  <div
+                    className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+                    key={task.id}
+                  >
+                    <label className="flex min-w-0 items-center gap-3">
+                      <input
+                        className="size-4"
+                        type="checkbox"
+                        checked={task.status === "done"}
+                        onChange={() => handleToggleTask(task)}
+                      />
+                      <span
+                        className={`min-w-0 text-sm ${
+                          task.status === "done"
+                            ? "text-zinc-400 line-through"
+                            : "text-zinc-900"
+                        }`}
+                      >
+                        {task.title}
+                      </span>
+                    </label>
+                    <button
+                      className="self-start rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50 sm:self-auto"
+                      type="button"
+                      onClick={() => handleDeleteTask(task.id)}
+                    >
+                      削除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        ) : null}
 
         {user ? (
           <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
             <div className="rounded-lg border border-zinc-200 bg-white">
               <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4">
-                <h2 className="text-base font-semibold">顧客一覧</h2>
+                <div>
+                  <h2 className="text-base font-semibold">顧客一覧</h2>
+                  <p className="mt-1 text-sm text-zinc-500">
+                    {customers.length}件の顧客
+                  </p>
+                </div>
                 <button
                   className="rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-800 transition hover:bg-zinc-100"
                   type="button"
@@ -327,30 +903,51 @@ export default function Home() {
                   まだ顧客が登録されていません。
                 </p>
               ) : (
-                <div className="divide-y divide-zinc-200">
+                <div className="overflow-x-auto">
+                  <div className="hidden min-w-[760px] grid-cols-[minmax(180px,1.1fr)_minmax(160px,1fr)_minmax(220px,1.2fr)_120px_82px] border-b border-zinc-200 bg-zinc-50 px-5 py-3 text-xs font-medium text-zinc-500 md:grid">
+                    <span>顧客名</span>
+                    <span>会社</span>
+                    <span>連絡先</span>
+                    <span>ステータス</span>
+                    <span className="text-right">操作</span>
+                  </div>
                   {customers.map((customer) => (
                     <button
-                      className={`grid w-full gap-2 px-5 py-4 text-left transition hover:bg-zinc-50 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_110px] ${
-                        selectedCustomerId === customer.id ? "bg-zinc-50" : ""
+                      className={`grid w-full min-w-0 gap-3 border-b border-zinc-100 px-5 py-4 text-left transition last:border-b-0 hover:bg-zinc-50 md:min-w-[760px] md:grid-cols-[minmax(180px,1.1fr)_minmax(160px,1fr)_minmax(220px,1.2fr)_120px_82px] md:items-center ${
+                        selectedCustomerId === customer.id
+                          ? "border-l-4 border-l-zinc-950 bg-zinc-50 pl-4"
+                          : ""
                       }`}
                       key={customer.id}
                       type="button"
                       onClick={() => handleSelectCustomer(customer)}
                     >
-                      <div>
-                        <p className="font-medium">{customer.name}</p>
-                        <p className="mt-1 text-sm text-zinc-500">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{customer.name}</p>
+                        <p className="mt-1 text-xs text-zinc-500 md:hidden">
                           {customer.company || "会社名未設定"}
                         </p>
                       </div>
-                      <div className="text-sm text-zinc-600">
-                        <p>{customer.email || "メール未設定"}</p>
-                        <p className="mt-1">{customer.phone || "電話未設定"}</p>
+                      <div className="hidden min-w-0 text-sm text-zinc-600 md:block">
+                        <p className="truncate">
+                          {customer.company || "会社名未設定"}
+                        </p>
+                      </div>
+                      <div className="min-w-0 text-sm text-zinc-600">
+                        <p className="truncate">
+                          {customer.email || "メール未設定"}
+                        </p>
+                        <p className="mt-1 truncate">
+                          {customer.phone || "電話未設定"}
+                        </p>
                       </div>
                       <div>
                         <span className="inline-flex rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700">
                           {statusLabels[customer.status] ?? customer.status}
                         </span>
+                      </div>
+                      <div className="text-sm font-medium text-zinc-700 md:text-right">
+                        編集
                       </div>
                     </button>
                   ))}
