@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:15
+    container_name: crm-gin-next-db
+    restart: unless-stopped
+    ports:
+      - "5435:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: crm_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  backend:
+    build:
+      context: ./backend
+    container_name: crm-gin-next-backend
+    depends_on:
+      - db
+    ports:
+      - "8081:8080"
+    environment:
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@db:5432/crm_db?sslmode=disable
+      JWT_ACCESS_SECRET: change_me_access
+      JWT_REFRESH_SECRET: change_me_refresh
+      FRONTEND_ORIGIN: http://localhost:3000
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: crm-gin-next-frontend
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8081/api/v1
+
+volumes:
+  postgres_data:
