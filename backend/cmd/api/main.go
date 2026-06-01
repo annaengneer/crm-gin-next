@@ -56,6 +56,30 @@ type customerInput struct {
 	Memo    string `json:"memo"`
 }
 
+type task struct {
+	ID         string     `json:"id"`
+	CustomerID *string    `json:"customerId"`
+	DealID     *string    `json:"dealId"`
+	OwnerID    string     `json:"ownerId"`
+	Title      string     `json:"title"`
+	DueDate    *string    `json:"dueDate"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	UpdatedAt  time.Time  `json:"updatedAt"`
+	DeletedAt  *time.Time `json:"-"`
+}
+
+type taskInput struct {
+	CustomerID string `json:"customerId"`
+	DealID     string `json:"dealId"`
+	Title      string `json:"title"`
+	DueDate    string `json:"dueDate"`
+}
+
+type taskStatusInput struct {
+	Status string `json:"status"`
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -115,6 +139,12 @@ func main() {
 	customers.GET("/:id", application.getCustomer)
 	customers.PUT("/:id", application.updateCustomer)
 	customers.DELETE("/:id", application.deleteCustomer)
+
+	tasks := api.Group("/tasks", application.authRequired())
+	tasks.GET("/today", application.listTodayTasks)
+	tasks.POST("", application.createTask)
+	tasks.PUT("/:id/status", application.updateTaskStatus)
+	tasks.DELETE("/:id", application.deleteTask)
 
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal(err)
@@ -318,6 +348,131 @@ func (a app) deleteCustomer(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
+func (a app) listTodayTasks(c *gin.Context) {
+	userID := c.GetString("userID")
+	today := c.Query("date")
+	if _, err := parseDate(today); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date must be YYYY-MM-DD"})
+		return
+	}
+
+	rows, err := a.db.Query(`
+		SELECT id::text, customer_id::text, deal_id::text, owner_id::text, title, due_date, status, created_at, updated_at, deleted_at
+		FROM tasks
+		WHERE owner_id = $1 AND due_date = $2 AND deleted_at IS NULL
+		ORDER BY
+			CASE WHEN status = 'done' THEN 1 ELSE 0 END,
+			updated_at DESC,
+			created_at DESC
+	`, userID, today)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tasks"})
+		return
+	}
+	defer rows.Close()
+
+	tasks := []task{}
+	for rows.Next() {
+		item, err := scanTask(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read task"})
+			return
+		}
+		tasks = append(tasks, item)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load tasks"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+}
+
+func (a app) createTask(c *gin.Context) {
+	userID := c.GetString("userID")
+
+	input, ok := bindTaskInput(c)
+	if !ok {
+		return
+	}
+
+	row := a.db.QueryRow(`
+		INSERT INTO tasks (customer_id, deal_id, owner_id, title, due_date, status)
+		VALUES (NULLIF($1, '')::uuid, NULLIF($2, '')::uuid, $3, $4, $5, 'todo')
+		RETURNING id::text, customer_id::text, deal_id::text, owner_id::text, title, due_date, status, created_at, updated_at, deleted_at
+	`, input.CustomerID, input.DealID, userID, input.Title, input.DueDate)
+
+	item, err := scanTask(row)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create task"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"task": item})
+}
+
+func (a app) updateTaskStatus(c *gin.Context) {
+	userID := c.GetString("userID")
+	taskID := c.Param("id")
+
+	var input taskStatusInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	input.Status = strings.TrimSpace(input.Status)
+	if input.Status != "todo" && input.Status != "done" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status must be todo or done"})
+		return
+	}
+
+	row := a.db.QueryRow(`
+		UPDATE tasks
+		SET status = $3, updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+		RETURNING id::text, customer_id::text, deal_id::text, owner_id::text, title, due_date, status, created_at, updated_at, deleted_at
+	`, taskID, userID, input.Status)
+
+	item, err := scanTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update task"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"task": item})
+}
+
+func (a app) deleteTask(c *gin.Context) {
+	userID := c.GetString("userID")
+	taskID := c.Param("id")
+
+	result, err := a.db.Exec(`
+		UPDATE tasks
+		SET deleted_at = now(), updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+	`, taskID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete task"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete task"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 func (a app) authRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -399,6 +554,40 @@ func scanCustomer(row interface {
 	return item, err
 }
 
+func scanTask(row interface {
+	Scan(dest ...interface{}) error
+}) (task, error) {
+	var item task
+	var customerID sql.NullString
+	var dealID sql.NullString
+	var dueDate sql.NullTime
+
+	err := row.Scan(
+		&item.ID,
+		&customerID,
+		&dealID,
+		&item.OwnerID,
+		&item.Title,
+		&dueDate,
+		&item.Status,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&item.DeletedAt,
+	)
+	if customerID.Valid {
+		item.CustomerID = &customerID.String
+	}
+	if dealID.Valid {
+		item.DealID = &dealID.String
+	}
+	if dueDate.Valid {
+		formatted := dueDate.Time.Format("2006-01-02")
+		item.DueDate = &formatted
+	}
+
+	return item, err
+}
+
 func bindCustomerInput(c *gin.Context) (customerInput, bool) {
 	var input customerInput
 	if err := c.ShouldBindJSON(&input); err != nil {
@@ -422,6 +611,34 @@ func bindCustomerInput(c *gin.Context) (customerInput, bool) {
 	}
 
 	return input, true
+}
+
+func bindTaskInput(c *gin.Context) (taskInput, bool) {
+	var input taskInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return taskInput{}, false
+	}
+
+	input.CustomerID = strings.TrimSpace(input.CustomerID)
+	input.DealID = strings.TrimSpace(input.DealID)
+	input.Title = strings.TrimSpace(input.Title)
+	input.DueDate = strings.TrimSpace(input.DueDate)
+
+	if input.Title == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "title is required"})
+		return taskInput{}, false
+	}
+	if _, err := parseDate(input.DueDate); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dueDate must be YYYY-MM-DD"})
+		return taskInput{}, false
+	}
+
+	return input, true
+}
+
+func parseDate(value string) (time.Time, error) {
+	return time.Parse("2006-01-02", value)
 }
 
 func corsMiddleware() gin.HandlerFunc {

@@ -35,6 +35,18 @@ type CustomerForm = {
   memo: string;
 };
 
+type Task = {
+  id: string;
+  customerId: string | null;
+  dealId: string | null;
+  ownerId: string;
+  title: string;
+  dueDate: string | null;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type AuthResponse = {
   accessToken: string;
   user: User;
@@ -50,6 +62,14 @@ type CustomersResponse = {
 
 type CustomerResponse = {
   customer: Customer;
+};
+
+type TasksResponse = {
+  tasks: Task[];
+};
+
+type TaskResponse = {
+  task: Task;
 };
 
 const tokenStorageKey = "crm_access_token";
@@ -70,16 +90,29 @@ const statusLabels: Record<string, string> = {
   closed: "完了",
 };
 
+function getTodayDate() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null,
   );
   const [form, setForm] = useState<CustomerForm>(emptyCustomerForm);
+  const [taskTitle, setTaskTitle] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCustomersLoading, setIsCustomersLoading] = useState(false);
+  const [isTasksLoading, setIsTasksLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isTaskSaving, setIsTaskSaving] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -99,12 +132,13 @@ export default function Home() {
     apiGet<MeResponse>("/auth/me", { token: storedToken })
       .then((response) => {
         setUser(response.user);
-        return loadCustomers(storedToken);
+        return Promise.all([loadCustomers(storedToken), loadTodayTasks(storedToken)]);
       })
       .catch(() => {
         window.localStorage.removeItem(tokenStorageKey);
         setUser(null);
         setCustomers([]);
+        setTasks([]);
       })
       .finally(() => {
         setIsLoading(false);
@@ -122,6 +156,20 @@ export default function Home() {
     }
   }
 
+  async function loadTodayTasks(token: string) {
+    setIsTasksLoading(true);
+
+    try {
+      const response = await apiGet<TasksResponse>(
+        `/tasks/today?date=${getTodayDate()}`,
+        { token },
+      );
+      setTasks(response.tasks);
+    } finally {
+      setIsTasksLoading(false);
+    }
+  }
+
   async function handleGuestLogin() {
     setIsLoggingIn(true);
     setError(null);
@@ -130,7 +178,10 @@ export default function Home() {
       const response = await apiPost<AuthResponse>("/auth/guest");
       window.localStorage.setItem(tokenStorageKey, response.accessToken);
       setUser(response.user);
-      await loadCustomers(response.accessToken);
+      await Promise.all([
+        loadCustomers(response.accessToken),
+        loadTodayTasks(response.accessToken),
+      ]);
     } catch {
       setError("ゲストログインに失敗しました。時間をおいて再度お試しください。");
     } finally {
@@ -142,8 +193,10 @@ export default function Home() {
     window.localStorage.removeItem(tokenStorageKey);
     setUser(null);
     setCustomers([]);
+    setTasks([]);
     setSelectedCustomerId(null);
     setForm(emptyCustomerForm);
+    setTaskTitle("");
     setError(null);
   }
 
@@ -230,6 +283,81 @@ export default function Home() {
     }
   }
 
+  async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを作成するにはログインしてください。");
+      return;
+    }
+    if (!taskTitle.trim()) {
+      setError("タスク名を入力してください。");
+      return;
+    }
+
+    setIsTaskSaving(true);
+    setError(null);
+
+    try {
+      const response = await apiPost<TaskResponse>(
+        "/tasks",
+        {
+          title: taskTitle,
+          dueDate: getTodayDate(),
+        },
+        { token },
+      );
+      setTasks((current) => [response.task, ...current]);
+      setTaskTitle("");
+    } catch {
+      setError("タスクの作成に失敗しました。");
+    } finally {
+      setIsTaskSaving(false);
+    }
+  }
+
+  async function handleToggleTask(task: Task) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを更新するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      const nextStatus = task.status === "done" ? "todo" : "done";
+      const response = await apiPut<TaskResponse>(
+        `/tasks/${task.id}/status`,
+        { status: nextStatus },
+        { token },
+      );
+      setTasks((current) =>
+        current.map((item) => (item.id === task.id ? response.task : item)),
+      );
+    } catch {
+      setError("タスクの更新に失敗しました。");
+    }
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("タスクを削除するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await apiDelete(`/tasks/${taskId}`, { token });
+      setTasks((current) => current.filter((task) => task.id !== taskId));
+    } catch {
+      setError("タスクの削除に失敗しました。");
+    }
+  }
+
   const expiresAt = user?.guestExpiresAt
     ? new Intl.DateTimeFormat("ja-JP", {
         dateStyle: "medium",
@@ -301,10 +429,79 @@ export default function Home() {
             <p className="mt-2 text-3xl font-semibold">0</p>
           </div>
           <div className="rounded-lg border border-zinc-200 bg-white p-5">
-            <p className="text-sm text-zinc-500">今週のタスク</p>
-            <p className="mt-2 text-3xl font-semibold">0</p>
+            <p className="text-sm text-zinc-500">今日のタスク</p>
+            <p className="mt-2 text-3xl font-semibold">{tasks.length}</p>
           </div>
         </section>
+
+        {user ? (
+          <section className="mb-6 rounded-lg border border-zinc-200 bg-white">
+            <div className="border-b border-zinc-200 px-5 py-4">
+              <h2 className="text-base font-semibold">今日のタスク</h2>
+            </div>
+
+            <form
+              className="flex flex-col gap-3 border-b border-zinc-200 px-5 py-4 sm:flex-row"
+              onSubmit={handleCreateTask}
+            >
+              <input
+                className="min-w-0 flex-1 rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                placeholder="今日やることを入力"
+                value={taskTitle}
+                onChange={(event) => setTaskTitle(event.target.value)}
+              />
+              <button
+                className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                type="submit"
+                disabled={isTaskSaving}
+              >
+                {isTaskSaving ? "追加中..." : "追加"}
+              </button>
+            </form>
+
+            {isTasksLoading ? (
+              <p className="px-5 py-6 text-sm text-zinc-500">読み込み中...</p>
+            ) : tasks.length === 0 ? (
+              <p className="px-5 py-6 text-sm text-zinc-500">
+                今日のタスクはありません。
+              </p>
+            ) : (
+              <div className="divide-y divide-zinc-200">
+                {tasks.map((task) => (
+                  <div
+                    className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+                    key={task.id}
+                  >
+                    <label className="flex min-w-0 items-center gap-3">
+                      <input
+                        className="size-4"
+                        type="checkbox"
+                        checked={task.status === "done"}
+                        onChange={() => handleToggleTask(task)}
+                      />
+                      <span
+                        className={`min-w-0 text-sm ${
+                          task.status === "done"
+                            ? "text-zinc-400 line-through"
+                            : "text-zinc-900"
+                        }`}
+                      >
+                        {task.title}
+                      </span>
+                    </label>
+                    <button
+                      className="self-start rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50 sm:self-auto"
+                      type="button"
+                      onClick={() => handleDeleteTask(task.id)}
+                    >
+                      削除
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        ) : null}
 
         {user ? (
           <section className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
