@@ -31,6 +31,34 @@ export async function apiPost<T>(
   return handleResponse<T>(response);
 }
 
+export async function apiPut<T>(
+  path: string,
+  body: unknown,
+  options: RequestOptions = {},
+): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "PUT",
+    headers: buildHeaders(options),
+    body: JSON.stringify(body),
+  });
+
+  return handleResponse<T>(response);
+}
+
+export async function apiDelete(
+  path: string,
+  options: RequestOptions = {},
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    method: "DELETE",
+    headers: buildHeaders(options),
+  });
+
+  if (!response.ok) {
+    throw new Error("API request failed");
+  }
+}
+
 function buildHeaders(options: RequestOptions): HeadersInit {
   const headers: HeadersInit = {
     "Content-Type": "application/json",

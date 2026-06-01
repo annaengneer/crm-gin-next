@@ -33,6 +33,29 @@ type authResponse struct {
 	User        user   `json:"user"`
 }
 
+type customer struct {
+	ID        string     `json:"id"`
+	OwnerID   string     `json:"ownerId"`
+	Name      string     `json:"name"`
+	Company   *string    `json:"company"`
+	Email     *string    `json:"email"`
+	Phone     *string    `json:"phone"`
+	Status    string     `json:"status"`
+	Memo      *string    `json:"memo"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	DeletedAt *time.Time `json:"-"`
+}
+
+type customerInput struct {
+	Name    string `json:"name"`
+	Company string `json:"company"`
+	Email   string `json:"email"`
+	Phone   string `json:"phone"`
+	Status  string `json:"status"`
+	Memo    string `json:"memo"`
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -85,6 +108,13 @@ func main() {
 	})
 	api.POST("/auth/guest", application.guestLogin)
 	api.GET("/auth/me", application.authRequired(), application.me)
+
+	customers := api.Group("/customers", application.authRequired())
+	customers.GET("", application.listCustomers)
+	customers.POST("", application.createCustomer)
+	customers.GET("/:id", application.getCustomer)
+	customers.PUT("/:id", application.updateCustomer)
+	customers.DELETE("/:id", application.deleteCustomer)
 
 	if err := router.Run(":" + port); err != nil {
 		log.Fatal(err)
@@ -148,6 +178,146 @@ func (a app) me(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"user": currentUser})
 }
 
+func (a app) listCustomers(c *gin.Context) {
+	userID := c.GetString("userID")
+
+	rows, err := a.db.Query(`
+		SELECT id::text, owner_id::text, name, company, email, phone, status, memo, created_at, updated_at, deleted_at
+		FROM customers
+		WHERE owner_id = $1 AND deleted_at IS NULL
+		ORDER BY updated_at DESC, created_at DESC
+	`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load customers"})
+		return
+	}
+	defer rows.Close()
+
+	customers := []customer{}
+	for rows.Next() {
+		item, err := scanCustomer(rows)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read customer"})
+			return
+		}
+		customers = append(customers, item)
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load customers"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"customers": customers})
+}
+
+func (a app) createCustomer(c *gin.Context) {
+	userID := c.GetString("userID")
+
+	input, ok := bindCustomerInput(c)
+	if !ok {
+		return
+	}
+
+	row := a.db.QueryRow(`
+		INSERT INTO customers (owner_id, name, company, email, phone, status, memo)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, NULLIF($7, ''))
+		RETURNING id::text, owner_id::text, name, company, email, phone, status, memo, created_at, updated_at, deleted_at
+	`, userID, input.Name, input.Company, input.Email, input.Phone, input.Status, input.Memo)
+
+	item, err := scanCustomer(row)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create customer"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"customer": item})
+}
+
+func (a app) getCustomer(c *gin.Context) {
+	userID := c.GetString("userID")
+	customerID := c.Param("id")
+
+	row := a.db.QueryRow(`
+		SELECT id::text, owner_id::text, name, company, email, phone, status, memo, created_at, updated_at, deleted_at
+		FROM customers
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+	`, customerID, userID)
+
+	item, err := scanCustomer(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load customer"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"customer": item})
+}
+
+func (a app) updateCustomer(c *gin.Context) {
+	userID := c.GetString("userID")
+	customerID := c.Param("id")
+
+	input, ok := bindCustomerInput(c)
+	if !ok {
+		return
+	}
+
+	row := a.db.QueryRow(`
+		UPDATE customers
+		SET name = $3,
+			company = NULLIF($4, ''),
+			email = NULLIF($5, ''),
+			phone = NULLIF($6, ''),
+			status = $7,
+			memo = NULLIF($8, ''),
+			updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+		RETURNING id::text, owner_id::text, name, company, email, phone, status, memo, created_at, updated_at, deleted_at
+	`, customerID, userID, input.Name, input.Company, input.Email, input.Phone, input.Status, input.Memo)
+
+	item, err := scanCustomer(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update customer"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"customer": item})
+}
+
+func (a app) deleteCustomer(c *gin.Context) {
+	userID := c.GetString("userID")
+	customerID := c.Param("id")
+
+	result, err := a.db.Exec(`
+		UPDATE customers
+		SET deleted_at = now(), updated_at = now()
+		WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+	`, customerID, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete customer"})
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete customer"})
+		return
+	}
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "customer not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
 func (a app) authRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
@@ -207,6 +377,51 @@ func scanUser(row interface {
 		&currentUser.GuestExpiresAt,
 	)
 	return currentUser, err
+}
+
+func scanCustomer(row interface {
+	Scan(dest ...interface{}) error
+}) (customer, error) {
+	var item customer
+	err := row.Scan(
+		&item.ID,
+		&item.OwnerID,
+		&item.Name,
+		&item.Company,
+		&item.Email,
+		&item.Phone,
+		&item.Status,
+		&item.Memo,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+		&item.DeletedAt,
+	)
+	return item, err
+}
+
+func bindCustomerInput(c *gin.Context) (customerInput, bool) {
+	var input customerInput
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return customerInput{}, false
+	}
+
+	input.Name = strings.TrimSpace(input.Name)
+	input.Company = strings.TrimSpace(input.Company)
+	input.Email = strings.TrimSpace(input.Email)
+	input.Phone = strings.TrimSpace(input.Phone)
+	input.Status = strings.TrimSpace(input.Status)
+	input.Memo = strings.TrimSpace(input.Memo)
+
+	if input.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return customerInput{}, false
+	}
+	if input.Status == "" {
+		input.Status = "lead"
+	}
+
+	return input, true
 }
 
 func corsMiddleware() gin.HandlerFunc {
