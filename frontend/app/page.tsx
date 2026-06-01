@@ -58,6 +58,17 @@ type DealForm = {
   memo: string;
 };
 
+type Activity = {
+  id: string;
+  customerId: string;
+  customerName: string;
+  ownerId: string;
+  type: string;
+  body: string;
+  occurredAt: string;
+  createdAt: string;
+};
+
 type Task = {
   id: string;
   customerId: string | null;
@@ -93,6 +104,14 @@ type DealsResponse = {
 
 type DealResponse = {
   deal: Deal;
+};
+
+type ActivitiesResponse = {
+  activities: Activity[];
+};
+
+type ActivityResponse = {
+  activity: Activity;
 };
 
 type TasksResponse = {
@@ -137,6 +156,13 @@ const dealStatusLabels: Record<string, string> = {
   paused: "保留",
 };
 
+const activityTypeLabels: Record<string, string> = {
+  note: "メモ",
+  call: "電話",
+  email: "メール",
+  meeting: "訪問",
+};
+
 function getTodayDate() {
   const now = new Date();
   const year = now.getFullYear();
@@ -150,6 +176,7 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [deals, setDeals] = useState<Deal[]>([]);
+  const [activities, setActivities] = useState<Activity[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null,
@@ -157,13 +184,17 @@ export default function Home() {
   const [selectedDealId, setSelectedDealId] = useState<string | null>(null);
   const [form, setForm] = useState<CustomerForm>(emptyCustomerForm);
   const [dealForm, setDealForm] = useState<DealForm>(emptyDealForm);
+  const [activityType, setActivityType] = useState("note");
+  const [activityBody, setActivityBody] = useState("");
   const [taskTitle, setTaskTitle] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [isCustomersLoading, setIsCustomersLoading] = useState(false);
   const [isDealsLoading, setIsDealsLoading] = useState(false);
+  const [isActivitiesLoading, setIsActivitiesLoading] = useState(false);
   const [isTasksLoading, setIsTasksLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDealSaving, setIsDealSaving] = useState(false);
+  const [isActivitySaving, setIsActivitySaving] = useState(false);
   const [isTaskSaving, setIsTaskSaving] = useState(false);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -200,6 +231,7 @@ export default function Home() {
         setUser(null);
         setCustomers([]);
         setDeals([]);
+        setActivities([]);
         setTasks([]);
       })
       .finally(() => {
@@ -226,6 +258,20 @@ export default function Home() {
       setDeals(response.deals);
     } finally {
       setIsDealsLoading(false);
+    }
+  }
+
+  async function loadCustomerActivities(customerId: string, token: string) {
+    setIsActivitiesLoading(true);
+
+    try {
+      const response = await apiGet<ActivitiesResponse>(
+        `/customers/${customerId}/activities`,
+        { token },
+      );
+      setActivities(response.activities);
+    } finally {
+      setIsActivitiesLoading(false);
     }
   }
 
@@ -268,16 +314,20 @@ export default function Home() {
     setUser(null);
     setCustomers([]);
     setDeals([]);
+    setActivities([]);
     setTasks([]);
     setSelectedCustomerId(null);
     setSelectedDealId(null);
     setForm(emptyCustomerForm);
     setDealForm(emptyDealForm);
+    setActivityType("note");
+    setActivityBody("");
     setTaskTitle("");
     setError(null);
   }
 
   function handleSelectCustomer(customer: Customer) {
+    const token = window.localStorage.getItem(tokenStorageKey);
     setSelectedCustomerId(customer.id);
     setForm({
       name: customer.name,
@@ -287,12 +337,22 @@ export default function Home() {
       status: customer.status,
       memo: customer.memo ?? "",
     });
+    setActivityType("note");
+    setActivityBody("");
+    if (token) {
+      loadCustomerActivities(customer.id, token).catch(() => {
+        setError("活動履歴の読み込みに失敗しました。");
+      });
+    }
     setError(null);
   }
 
   function handleNewCustomer() {
     setSelectedCustomerId(null);
     setForm(emptyCustomerForm);
+    setActivities([]);
+    setActivityType("note");
+    setActivityBody("");
     setError(null);
   }
 
@@ -352,6 +412,7 @@ export default function Home() {
         });
         setCustomers((current) => [response.customer, ...current]);
         setSelectedCustomerId(response.customer.id);
+        setActivities([]);
       }
     } catch {
       setError("顧客情報の保存に失敗しました。");
@@ -379,6 +440,59 @@ export default function Home() {
       }
     } catch {
       setError("顧客の削除に失敗しました。");
+    }
+  }
+
+  async function handleCreateActivity(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token || !selectedCustomerId) {
+      setError("活動履歴を追加するには顧客を選択してください。");
+      return;
+    }
+    if (!activityBody.trim()) {
+      setError("活動内容を入力してください。");
+      return;
+    }
+
+    setIsActivitySaving(true);
+    setError(null);
+
+    try {
+      const response = await apiPost<ActivityResponse>(
+        `/customers/${selectedCustomerId}/activities`,
+        {
+          type: activityType,
+          body: activityBody,
+        },
+        { token },
+      );
+      setActivities((current) => [response.activity, ...current]);
+      setActivityBody("");
+    } catch {
+      setError("活動履歴の追加に失敗しました。");
+    } finally {
+      setIsActivitySaving(false);
+    }
+  }
+
+  async function handleDeleteActivity(activityId: string) {
+    const token = window.localStorage.getItem(tokenStorageKey);
+    if (!token) {
+      setError("活動履歴を削除するにはログインしてください。");
+      return;
+    }
+
+    setError(null);
+
+    try {
+      await apiDelete(`/activities/${activityId}`, { token });
+      setActivities((current) =>
+        current.filter((activity) => activity.id !== activityId),
+      );
+    } catch {
+      setError("活動履歴の削除に失敗しました。");
     }
   }
 
@@ -1086,6 +1200,94 @@ export default function Home() {
                 {isSaving ? "保存中..." : "保存"}
               </button>
             </form>
+
+            <div className="rounded-lg border border-zinc-200 bg-white lg:col-span-2">
+              <div className="border-b border-zinc-200 px-5 py-4">
+                <h2 className="text-base font-semibold">活動履歴</h2>
+                <p className="mt-1 text-sm text-zinc-500">
+                  {selectedCustomer
+                    ? `${selectedCustomer.name} の履歴`
+                    : "顧客を選択すると履歴を確認できます"}
+                </p>
+              </div>
+
+              {selectedCustomer ? (
+                <>
+                  <form
+                    className="grid gap-3 border-b border-zinc-200 px-5 py-4 md:grid-cols-[140px_minmax(0,1fr)_96px]"
+                    onSubmit={handleCreateActivity}
+                  >
+                    <select
+                      className="rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      value={activityType}
+                      onChange={(event) => setActivityType(event.target.value)}
+                    >
+                      <option value="note">メモ</option>
+                      <option value="call">電話</option>
+                      <option value="email">メール</option>
+                      <option value="meeting">訪問</option>
+                    </select>
+                    <input
+                      className="min-w-0 rounded-md border border-zinc-300 px-3 py-2 text-sm outline-none transition focus:border-zinc-600"
+                      placeholder="活動内容を入力"
+                      value={activityBody}
+                      onChange={(event) => setActivityBody(event.target.value)}
+                    />
+                    <button
+                      className="rounded-md bg-zinc-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+                      type="submit"
+                      disabled={isActivitySaving}
+                    >
+                      {isActivitySaving ? "追加中..." : "追加"}
+                    </button>
+                  </form>
+
+                  {isActivitiesLoading ? (
+                    <p className="px-5 py-6 text-sm text-zinc-500">
+                      読み込み中...
+                    </p>
+                  ) : activities.length === 0 ? (
+                    <p className="px-5 py-6 text-sm text-zinc-500">
+                      活動履歴はまだありません。
+                    </p>
+                  ) : (
+                    <div className="divide-y divide-zinc-200">
+                      {activities.map((activity) => (
+                        <div
+                          className="grid gap-3 px-5 py-4 md:grid-cols-[96px_minmax(0,1fr)_160px_72px] md:items-center"
+                          key={activity.id}
+                        >
+                          <span className="inline-flex w-fit rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700">
+                            {activityTypeLabels[activity.type] ??
+                              activity.type}
+                          </span>
+                          <p className="min-w-0 text-sm text-zinc-900">
+                            {activity.body}
+                          </p>
+                          <p className="text-sm text-zinc-500">
+                            {new Intl.DateTimeFormat("ja-JP", {
+                              dateStyle: "medium",
+                              timeStyle: "short",
+                            }).format(new Date(activity.occurredAt))}
+                          </p>
+                          <button
+                            className="w-fit rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 transition hover:bg-red-50 md:justify-self-end"
+                            type="button"
+                            onClick={() => handleDeleteActivity(activity.id)}
+                          >
+                            削除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="px-5 py-6 text-sm text-zinc-500">
+                  左の一覧から顧客を選択してください。
+                </p>
+              )}
+            </div>
           </section>
         ) : (
           <section className="rounded-lg border border-zinc-200 bg-white p-8 text-center">
